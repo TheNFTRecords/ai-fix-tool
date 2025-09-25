@@ -45,6 +45,15 @@
             <div class="row" style="margin:6px 0"><input type="radio" name="preset" id="presetC" value="C"> <label for="presetC" style="min-width:auto">補正C</label></div>
           </div>
         </div>
+        <div class="row">
+          <label>強度</label>
+          <div>
+            <div class="row" style="margin:6px 0"><input type="radio" name="strength" id="stNorm" value="normal" checked> <label for="stNorm" style="min-width:auto">標準</label></div>
+            <div class="row" style="margin:6px 0"><input type="radio" name="strength" id="stStrong" value="strong"> <label for="stStrong" style="min-width:auto">強め</label></div>
+            <div class="row" style="margin:6px 0"><input type="radio" name="strength" id="stMax" value="max"> <label for="stMax" style="min-width:auto">最大</label></div>
+          </div>
+        </div>
+        </div>
         <div class="muted">※ 補正はブラウザ内のみで適用され、ファイルはサーバーへ送信されません。</div>
         <div class="footer">
           <button id="exportPng" class="accent">PNG書き出し</button>
@@ -73,25 +82,101 @@
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     const presetRadios = Array.from(document.querySelectorAll('input[name="preset"]'));
+    const strengthRadios = Array.from(document.querySelectorAll('input[name="strength"]'));
 
     // 非公開アセットの読み込み先（例）
     // 実運用では認証付き配信やビルド時埋め込みを推奨（クライアントのみでは秘匿は不可能）。
-    const OVERLAY_SRC = {
-      A: 'assets/overlay_a.png',
-      B: 'assets/overlay_b.png',
-      C: 'assets/overlay_c.png'
-    };
+    // 手続き的テクスチャ（PNG不要・その場生成）
 
     // 各補正の固定パラメータ（UIでの変更不可）
     const PRESETS = {
-      A: { alpha: 0.30, blend: 'soft-light', tile: true, rotateDeg: 0, scale: 1.0 },
-      B: { alpha: 0.26, blend: 'overlay',    tile: true, rotateDeg: 0, scale: 1.0 },
-      C: { alpha: 0.22, blend: 'multiply',   tile: true, rotateDeg: 0, scale: 1.0 }
+      A: { alpha: 0.38, blend: 'soft-light' },
+      B: { alpha: 0.34, blend: 'overlay'    },
+      C: { alpha: 0.30, blend: 'multiply'   }
+    };
+
+    // 強度ごとの係数（アルファ倍率 + コントラスト増幅）
+    const STRENGTHS = {
+      normal: { alphaMul: 1.0, contrastK: 1.0, hatchDense: 1.0, grainGain: 1.0 },
+      strong: { alphaMul: 1.25, contrastK: 1.25, hatchDense: 1.25, grainGain: 1.3 },
+      max:    { alphaMul: 1.55, contrastK: 1.6,  hatchDense: 1.6,  grainGain: 1.6 }
     };
 
     let baseImage = null;
-    let overlays = {};
+    let patternCache = {}; // key: preset|strength|w|h → canvas
     let currentPreset = 'A';
+
+    function makeCanvas(w,h){ const c=document.createElement('canvas'); c.width=w; c.height=h; return c; }
+
+    // A: フラクタルノイズ（紙ムラ）
+    function genFractalNoise(w,h,contrastK){
+      const c = makeCanvas(w,h), g=c.getContext('2d');
+      const img = g.createImageData(w,h), d=img.data;
+      const octaves = 4, freqBase = 64, ampFalloff = 0.5;
+      for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+        let amp=1, val=0, norm=0;
+        for(let o=0;o<octaves;o++){
+          const f = Math.max(1, Math.floor(freqBase/(1<<o)));
+          const sx = Math.floor(x/f), sy=Math.floor(y/f);
+          const cellSeed = (sx*374761393 + sy*668265263 + o*2147483647)>>>0;
+          const r = (cellSeed ^ (cellSeed<<13))>>>0; const rv = (r>>>8)%1000/1000;
+          val += rv*amp; norm += amp; amp*=ampFalloff;
+        }
+        let nx = val/norm; // 0..1
+        // コントラスト強化
+        nx = (nx-0.5)*(contrastK||1)+0.5; if(nx<0) nx=0; if(nx>1) nx=1;
+        const i=(y*w+x)*4; const v = Math.floor(nx*255);
+        d[i]=d[i+1]=d[i+2]=v; d[i+3]=255;
+      }
+      g.putImageData(img,0,0); g.filter='blur(0.6px)'; g.drawImage(c,0,0); g.filter='none';
+      return c;
+    }
+
+    // B: サイン波ハッチ（斜線）
+    function genHatch(w,h,angleDeg=22,period=6,contrastK=1.0,densityMul=1.0){
+      const c = makeCanvas(w,h), g=c.getContext('2d');
+      const rad = angleDeg*Math.PI/180, cos=Math.cos(rad), sin=Math.sin(rad);
+      const img = g.createImageData(w,h), d=img.data;
+      const per = Math.max(2, period/ (densityMul||1));
+      for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+        const u = x*cos + y*sin; let v = Math.sin((u/per)*2*Math.PI)*0.5 + 0.5;
+        v = (v-0.5)*(contrastK||1)+0.5; if(v<0) v=0; if(v>1) v=1;
+        const i=(y*w+x)*4, gv=Math.floor(v*255); d[i]=d[i+1]=d[i+2]=gv; d[i+3]=255;
+      }
+      g.putImageData(img,0,0); g.globalAlpha=0.9; g.filter='blur(0.4px)'; g.drawImage(c,0,0); g.filter='none';
+      return c;
+    }
+    }
+
+    // C: グレイン（粒状）
+    function genGrain(w,h,gain=1.0){
+      const c = makeCanvas(w,h), g=c.getContext('2d');
+      const img = g.createImageData(w,h), d=img.data;
+      for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+        const n1=Math.random(), n2=Math.random();
+        let v = Math.pow(0.7*n1+0.3*n2,1.0); // ベース
+        v = Math.min(1, v*gain);
+        const i=(y*w+x)*4, gv=Math.floor(v*255); d[i]=d[i+1]=d[i+2]=gv; d[i+3]=255;
+      }
+      g.putImageData(img,0,0); g.globalAlpha=0.95; g.filter='blur(0.35px)'; g.drawImage(c,0,0); g.filter='none';
+      return c;
+    }
+    }
+
+    function getPattern(name,w,h){
+      const strength = getStrengthKey();
+      const key = `${name}|${strength}|${w}|${h}`;
+      if (patternCache[key]) return patternCache[key];
+      const st = STRENGTHS[strength];
+      let out;
+      if(name==='A') out=genFractalNoise(w,h,st.contrastK);
+      else if(name==='B') out=genHatch(w,h,22,6,st.contrastK,st.hatchDense);
+      else out=genGrain(w,h,st.grainGain);
+      patternCache[key]=out; return out;
+    }
+    function getStrengthKey(){
+      return strengthRadios.find(x=>x.checked)?.value || 'normal';
+    }
 
     function loadImageFromFile(file) {
       return new Promise((resolve, reject) => {
@@ -103,16 +188,7 @@
       });
     }
 
-    function loadImageFromURL(url){
-      return new Promise((resolve, reject)=>{
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = url;
-      });
-    }
-
+    
     async function setBaseFromFile(file){
       const {img, url} = await loadImageFromFile(file);
       baseImage = img;
@@ -143,36 +219,15 @@
       canvas.width = w; canvas.height = h;
       ctx.drawImage(baseImage, 0, 0, w, h);
 
-      const ovImg = overlays[currentPreset];
-      const cfg = PRESETS[currentPreset];
-      if (!ovImg || !cfg) return;
+      const cfgBase = PRESETS[currentPreset];
+      const st = STRENGTHS[getStrengthKey()];
+      const pat = getPattern(currentPreset, w, h);
+      if (!cfgBase || !st || !pat) return;
 
       ctx.save();
-      ctx.globalAlpha = cfg.alpha;
-      ctx.globalCompositeOperation = cfg.blend;
-
-      const scale = cfg.scale;
-      const rot = (cfg.rotateDeg || 0) * Math.PI/180;
-
-      if (cfg.tile){
-        const tw = ovImg.naturalWidth * scale;
-        const th = ovImg.naturalHeight * scale;
-        for(let y = 0; y < h + th; y += th){
-          for(let x = 0; x < w + tw; x += tw){
-            ctx.save();
-            ctx.translate(x + tw/2, y + th/2);
-            ctx.rotate(rot);
-            ctx.drawImage(ovImg, -tw/2, -th/2, tw, th);
-            ctx.restore();
-          }
-        }
-      } else {
-        const tw = ovImg.naturalWidth * scale;
-        const th = ovImg.naturalHeight * scale;
-        ctx.translate(w/2, h/2);
-        ctx.rotate(rot);
-        ctx.drawImage(ovImg, -tw/2, -th/2, tw, th);
-      }
+      ctx.globalAlpha = Math.min(1, cfgBase.alpha * st.alphaMul);
+      ctx.globalCompositeOperation = cfgBase.blend;
+      ctx.drawImage(pat, 0, 0, w, h);
       ctx.restore();
     }
 
@@ -182,9 +237,8 @@
       if (f) await setBaseFromFile(f);
     });
 
-    presetRadios.forEach(r=> r.addEventListener('change', ()=>{
-      currentPreset = presetRadios.find(x=>x.checked)?.value || 'A';
-      draw();
+    presetRadios.forEach(r=> r.addEventListener('change', ()=>{ currentPreset = presetRadios.find(x=>x.checked)?.value || 'A'; draw(); }));
+    strengthRadios.forEach(r=> r.addEventListener('change', ()=>{ patternCache = {}; draw(); }));
     }));
 
     exportPngBtn.addEventListener('click', ()=> downloadCanvas('image/png'));
