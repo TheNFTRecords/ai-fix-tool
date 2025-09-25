@@ -146,7 +146,6 @@
       g.putImageData(img,0,0); g.globalAlpha=0.9; g.filter='blur(0.4px)'; g.drawImage(c,0,0); g.filter='none';
       return c;
     }
-    }
 
     // C: グレイン（粒状）
     function genGrain(w,h,gain=1.0){
@@ -160,7 +159,6 @@
       }
       g.putImageData(img,0,0); g.globalAlpha=0.95; g.filter='blur(0.35px)'; g.drawImage(c,0,0); g.filter='none';
       return c;
-    }
     }
 
     function getPattern(name,w,h){
@@ -237,12 +235,17 @@
       if (f) await setBaseFromFile(f);
     });
 
-    presetRadios.forEach(r=> r.addEventListener('change', ()=>{ currentPreset = presetRadios.find(x=>x.checked)?.value || 'A'; draw(); }));
-    strengthRadios.forEach(r=> r.addEventListener('change', ()=>{ patternCache = {}; draw(); }));
-    }));
-
-    exportPngBtn.addEventListener('click', ()=> downloadCanvas('image/png'));
-    exportJpgBtn.addEventListener('click', ()=> downloadCanvas('image/jpeg', 0.95));
+presetRadios.forEach(r => r.addEventListener('change', () => {
+  currentPreset = presetRadios.find(x=>x.checked)?.value || 'A';
+  draw();
+}));
+strengthRadios.forEach(r => r.addEventListener('change', () => {
+  patternCache = {};
+  draw();
+}));
+// ↓この下にそのまま続けてOK（孤立した `));` 行は削除）
+exportPngBtn.addEventListener('click', () => downloadCanvas('image/png'));
+exportJpgBtn.addEventListener('click', () => downloadCanvas('image/jpeg', 0.95));
 
     clearBtn.addEventListener('click', ()=>{
       baseImage = null; ctx.clearRect(0,0,canvas.width,canvas.height);
